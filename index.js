@@ -16,17 +16,19 @@ const UI_ID = 'duo_settings';
 const STATUS_ID = 'duo_status';
 const OUTPUT_ID = 'duo_output';
 const RESULTS_ID = 'duo_results';
+const SETTINGS_VERSION = 2;
 
 const DEFAULT_SETTINGS = Object.freeze({
+    settingsVersion: SETTINGS_VERSION,
     enabled: true,
-    autoBeforeGeneration: false,
+    autoBeforeGeneration: true,
     injectAfterManualRun: true,
     searchProvider: 'duckduckgo_html',
     searxngBaseUrl: 'https://searx.be',
-    maxResults: 6,
+    maxResults: 8,
     visitTopResults: 0,
-    visitMaxChars: 6000,
-    cacheTtlMinutes: 30,
+    visitMaxChars: 4000,
+    cacheTtlMinutes: 60,
     orchestrationMode: 'fast',
     maxConcurrentAgents: 3,
     responseLength: 420,
@@ -42,19 +44,33 @@ const SEARCH_TRIGGERS = [
     '搜索',
     '联网',
     '查一下',
+    '查一查',
     '查找',
+    '检索',
+    '搜一下',
+    '上网查',
+    '网上查',
     '最新',
     '今天',
+    '现在',
     '新闻',
     '资料',
     '资料库',
     '现实',
+    '事实',
+    '真实',
+    '出处',
+    '来源',
     'web',
     'search',
+    'google',
     'latest',
     'today',
     'news',
 ];
+
+const SEARCH_PREFIX_PATTERN = /^\s*(?:请|帮我|麻烦(?:你)?|可以(?:帮我)?)?\s*(?:联网搜索|联网查|上网查|网上查|搜索|搜一下|搜搜|查一下|查一查|查找|检索|google|web\s*search|search)\s*(?:一下)?[：:，,\s]*(.+)$/i;
+const SLASH_SEARCH_PATTERN = /^\s*\/(?:web|search)\s+(.+)$/i;
 
 const AGENTS = Object.freeze({
     single: {
@@ -113,16 +129,48 @@ function getSettings() {
         extension_settings[MODULE_NAME] = {};
     }
     const settings = extension_settings[MODULE_NAME];
+    const existingVersion = Number(settings.settingsVersion || 0);
     for (const [key, value] of Object.entries(DEFAULT_SETTINGS)) {
         if (settings[key] === undefined) {
             settings[key] = clone(value);
         }
     }
+    migrateSettings(settings, existingVersion);
     return settings;
 }
 
 function saveSettings() {
     saveSettingsDebounced();
+}
+
+function migrateSettings(settings, version = Number(settings.settingsVersion || 0)) {
+    if (version >= SETTINGS_VERSION) return;
+
+    settings.enabled = true;
+    settings.autoBeforeGeneration = true;
+    settings.injectAfterManualRun = true;
+    settings.searchProvider = settings.searchProvider || DEFAULT_SETTINGS.searchProvider;
+    settings.maxResults = Math.max(1, Math.min(20, Number(settings.maxResults) || DEFAULT_SETTINGS.maxResults));
+    settings.visitTopResults = Math.max(0, Math.min(3, Number(settings.visitTopResults) || DEFAULT_SETTINGS.visitTopResults));
+    settings.visitMaxChars = Math.max(1000, Number(settings.visitMaxChars) || DEFAULT_SETTINGS.visitMaxChars);
+    settings.cacheTtlMinutes = Math.max(5, Number(settings.cacheTtlMinutes) || DEFAULT_SETTINGS.cacheTtlMinutes);
+    settings.orchestrationMode = settings.orchestrationMode || DEFAULT_SETTINGS.orchestrationMode;
+    settings.maxConcurrentAgents = Math.max(1, Math.min(5, Number(settings.maxConcurrentAgents) || DEFAULT_SETTINGS.maxConcurrentAgents));
+    settings.includeSearchInOrchestration = true;
+    settings.autoSearchPolicy = settings.autoSearchPolicy || DEFAULT_SETTINGS.autoSearchPolicy;
+    settings.settingsVersion = SETTINGS_VERSION;
+    saveSettings();
+}
+
+function applyRecommendedDefaults() {
+    const settings = getSettings();
+    const searxngBaseUrl = settings.searxngBaseUrl || DEFAULT_SETTINGS.searxngBaseUrl;
+    Object.assign(settings, clone(DEFAULT_SETTINGS), { searxngBaseUrl });
+    syncSettingsUi();
+    clearInjection();
+    saveSettings();
+    setStatus('已应用推荐默认：自动运行、按需搜索、Fast 并行。');
+    notify('success', 'Duo 已切换到推荐默认配置。');
 }
 
 function notify(level, message) {
@@ -192,6 +240,27 @@ function getLatestUserMessage() {
 function shouldAutoSearch(text) {
     const lower = String(text || '').toLowerCase();
     return SEARCH_TRIGGERS.some(trigger => lower.includes(trigger.toLowerCase()));
+}
+
+function extractSearchQuery(text) {
+    const source = normalizeWhitespace(text);
+    if (!source) return '';
+
+    const slashMatch = source.match(SLASH_SEARCH_PATTERN);
+    if (slashMatch?.[1]) return normalizeSearchQuery(slashMatch[1], source);
+
+    const prefixMatch = source.match(SEARCH_PREFIX_PATTERN);
+    if (prefixMatch?.[1]) return normalizeSearchQuery(prefixMatch[1], source);
+
+    return source;
+}
+
+function normalizeSearchQuery(candidate, fallback) {
+    const cleaned = normalizeWhitespace(candidate)
+        .replace(/^(一下|一下子|有关|关于|一下关于)\s*/i, '')
+        .replace(/[？?。！!]+$/g, '')
+        .trim();
+    return cleaned.length >= 2 ? cleaned : fallback;
 }
 
 function makeCacheKey(parts) {
@@ -439,9 +508,10 @@ function getSearchQueryForRun(source) {
     const manualQuery = normalizeWhitespace($('#duo_search_query').val());
     if (manualQuery) return manualQuery;
     const latestUser = getLatestUserMessage();
-    if (source === 'manual' && settings.autoSearchPolicy !== 'never') return latestUser;
-    if (settings.autoSearchPolicy === 'always') return latestUser;
-    if (settings.autoSearchPolicy === 'when_requested' && shouldAutoSearch(latestUser)) return latestUser;
+    const searchQuery = extractSearchQuery(latestUser);
+    if (source === 'manual' && settings.autoSearchPolicy !== 'never') return searchQuery;
+    if (settings.autoSearchPolicy === 'always') return searchQuery;
+    if (settings.autoSearchPolicy === 'when_requested' && shouldAutoSearch(latestUser)) return searchQuery;
     return '';
 }
 
@@ -755,6 +825,10 @@ function buildSettingsHtml() {
                     </div>
 
                     <div class="duo-extension-actions">
+                        <button id="duo_defaults_btn" class="menu_button" title="Apply recommended defaults">
+                            <i class="fa-solid fa-wand-magic-sparkles"></i>
+                            <span>推荐默认</span>
+                        </button>
                         <button id="duo_run_btn" class="menu_button" title="Run agents">
                             <i class="fa-solid fa-people-arrows"></i>
                             <span>运行 Agent</span>
@@ -796,6 +870,24 @@ function bindInput(id, key, parser = String) {
     });
 }
 
+function syncSettingsUi() {
+    const settings = getSettings();
+    $('#duo_enabled').prop('checked', Boolean(settings.enabled));
+    $('#duo_auto_before_generation').prop('checked', Boolean(settings.autoBeforeGeneration));
+    $('#duo_inject_after_manual_run').prop('checked', Boolean(settings.injectAfterManualRun));
+    $('#duo_include_search_in_orchestration').prop('checked', Boolean(settings.includeSearchInOrchestration));
+    $('#duo_search_provider').val(settings.searchProvider);
+    $('#duo_searxng_base').val(settings.searxngBaseUrl);
+    $('#duo_max_results').val(settings.maxResults);
+    $('#duo_visit_top_results').val(settings.visitTopResults);
+    $('#duo_orchestration_mode').val(settings.orchestrationMode);
+    $('#duo_max_concurrent_agents').val(settings.maxConcurrentAgents);
+    $('#duo_response_length').val(settings.responseLength);
+    $('#duo_synth_response_length').val(settings.synthResponseLength);
+    $('#duo_auto_search_policy').val(settings.autoSearchPolicy);
+    $('#duo_injection_depth').val(settings.injectionDepth);
+}
+
 function bindUi() {
     bindCheckbox('duo_enabled', 'enabled');
     bindCheckbox('duo_auto_before_generation', 'autoBeforeGeneration');
@@ -813,6 +905,7 @@ function bindUi() {
     bindInput('duo_auto_search_policy', 'autoSearchPolicy');
     bindInput('duo_injection_depth', 'injectionDepth', value => Math.max(0, Math.min(100, Number(value) || 0)));
 
+    $('#duo_defaults_btn').on('click', () => applyRecommendedDefaults());
     $('#duo_search_btn').on('click', () => onManualSearch(true));
     $('#duo_run_btn').on('click', () => runMultiAgent('manual'));
     $('#duo_inject_btn').on('click', () => {
@@ -823,6 +916,7 @@ function bindUi() {
         clearInjection();
         setStatus('Injection cleared.');
     });
+    syncSettingsUi();
 }
 
 async function onGenerationAfterCommands(type, params, dryRun) {
