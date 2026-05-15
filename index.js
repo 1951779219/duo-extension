@@ -16,7 +16,7 @@ const UI_ID = 'duo_settings';
 const STATUS_ID = 'duo_status';
 const OUTPUT_ID = 'duo_output';
 const RESULTS_ID = 'duo_results';
-const SETTINGS_VERSION = 2;
+const SETTINGS_VERSION = 4;
 const ALLOWED_GENERATION_TYPES = new Set(['normal', 'continue', 'regenerate', 'swipe', 'impersonate']);
 
 const DEFAULT_SETTINGS = Object.freeze({
@@ -34,6 +34,8 @@ const DEFAULT_SETTINGS = Object.freeze({
     maxConcurrentAgents: 3,
     responseLength: 420,
     synthResponseLength: 720,
+    agentApi: 'current',
+    agentApiPresetName: '',
     maxRecentMessages: 14,
     includeSearchInOrchestration: true,
     autoSearchPolicy: 'when_requested',
@@ -106,12 +108,134 @@ const AGENTS = Object.freeze({
     },
 });
 
+const EXTRA_AGENTS = Object.freeze({
+    intent: {
+        label: '意图',
+        system: '你是玩家意图分析员。你只判断用户这句话真正想让剧情往哪里走、希望 AI 做什么，以及哪些内容不该误读。',
+        task: '提取本轮用户输入里的显性请求、隐性偏好、语气方向和必须避免的误解。保持短句。',
+    },
+    lore: {
+        label: '设定',
+        system: '你是世界观和设定顾问。你只关注地点、规则、组织、物品、能力和背景逻辑是否自洽。',
+        task: '列出当前剧情必须尊重的设定规则、可继续利用的世界观细节，以及可能冲突的地方。',
+    },
+    realism: {
+        label: '真实感',
+        system: '你是真实感顾问。你把场景里的行动、反应、常识和现实细节校准得更可信，但不压扁戏剧性。',
+        task: '给出让下一轮回复更自然可信的行动细节、感官细节、时间/空间约束和常识提醒。',
+    },
+    critic: {
+        label: '质检',
+        system: '你是剧情质检审校。你寻找下一轮最容易出问题的地方：跑题、重复、过度代写、忘记玩家可行动空间。',
+        task: '列出下一轮回复需要避开的 3-5 个风险，并给出对应的简短修正方向。',
+    },
+    style: {
+        label: '文风',
+        system: '你是文风顾问。你负责让下一轮回复的语气、节奏、意象和对白质感贴合当前聊天。',
+        task: '概括下一轮适合使用的文风、语气、意象和句式倾向，不要写完整正文。',
+    },
+});
+
+const AGENT_API_OPTIONS = Object.freeze({
+    current: '当前主 API',
+    openai: 'OpenAI / 兼容',
+    textgenerationwebui: 'TextGen WebUI',
+    kobold: 'Kobold',
+    koboldhorde: 'Kobold Horde',
+    novel: 'NovelAI',
+});
+
 const MODE_AGENTS = Object.freeze({
     single: ['single'],
     fast: ['continuity', 'character', 'plot'],
-    balanced: ['continuity', 'character', 'plot', 'research'],
-    deep: ['continuity', 'character', 'plot', 'research', 'editor'],
+    director: ['intent', 'continuity', 'character', 'plot', 'editor'],
+    creative: ['character', 'plot', 'style', 'editor'],
+    research: ['research', 'continuity', 'plot', 'critic'],
+    quality: ['intent', 'continuity', 'lore', 'realism', 'critic'],
+    audit: ['continuity', 'lore', 'realism', 'critic'],
+    balanced: ['intent', 'continuity', 'character', 'plot', 'research'],
+    deep: ['intent', 'continuity', 'character', 'plot', 'research', 'lore', 'realism', 'style', 'critic', 'editor'],
 });
+
+function getAgentDefinition(agentId) {
+    return AGENTS[agentId] || EXTRA_AGENTS[agentId] || AGENTS.single;
+}
+
+function getAgentLabel(agentId) {
+    return getAgentDefinition(agentId).label || agentId;
+}
+
+function getSelectedAgentApi(settings = getSettings()) {
+    const api = String(settings.agentApi || DEFAULT_SETTINGS.agentApi).trim();
+    if (api === 'current' && getSelectedAgentApiPresetName(settings)) {
+        return 'openai';
+    }
+    return api && api !== 'current' ? api : null;
+}
+
+function getSelectedAgentApiPresetName(settings = getSettings()) {
+    return String(settings.agentApiPresetName || '').trim();
+}
+
+function getAgentApiLabel(settings = getSettings()) {
+    const api = String(settings.agentApi || DEFAULT_SETTINGS.agentApi).trim();
+    return AGENT_API_OPTIONS[api] || api || AGENT_API_OPTIONS.current;
+}
+
+function getAgentRouteLabel(settings = getSettings()) {
+    const presetName = getSelectedAgentApiPresetName(settings);
+    if (presetName) {
+        return `${getAgentApiLabel(settings)} / 连接配置：${presetName}`;
+    }
+    return getAgentApiLabel(settings);
+}
+
+function getConnectionProfileNames() {
+    try {
+        const profiles = getContext()?.connectionProfiles?.list?.();
+        if (!Array.isArray(profiles)) {
+            return [];
+        }
+        return [...new Set(profiles.map(profile => String(profile?.name || '').trim()).filter(Boolean))]
+            .sort((a, b) => a.localeCompare(b));
+    } catch (error) {
+        console.debug('[Duo] Connection profile list unavailable:', error);
+        return [];
+    }
+}
+
+function renderConnectionProfileDatalist(selectedName = '') {
+    const selected = String(selectedName || '').trim();
+    const names = getConnectionProfileNames();
+    const options = names.map(name => `<option value="${escapeHtml(name)}"></option>`);
+    if (selected && !names.includes(selected)) {
+        options.push(`<option value="${escapeHtml(selected)}"></option>`);
+    }
+    return options.join('');
+}
+
+async function generateDuoRaw(request, settings = getSettings()) {
+    const apiPresetName = getSelectedAgentApiPresetName(settings);
+    const context = getContext();
+    if (apiPresetName && typeof context?.generateTask === 'function') {
+        const taskMessages = [
+            request.systemPrompt ? { role: 'system', content: String(request.systemPrompt) } : null,
+            { role: 'user', content: String(request.prompt || '') },
+        ].filter(Boolean);
+        const result = await context.generateTask({
+            taskMessages,
+            includeCharacterCard: false,
+            worldInfoSource: 'none',
+            apiPresetName,
+        });
+        const text = normalizeWhitespace(result?.assistantText || '');
+        if (!text) {
+            throw new Error('No message generated');
+        }
+        return text;
+    }
+    return generateRaw(request);
+}
 
 const runtime = {
     running: false,
@@ -162,6 +286,8 @@ function migrateSettings(settings, version = Number(settings.settingsVersion || 
     settings.maxConcurrentAgents = Math.max(1, Math.min(5, Number(settings.maxConcurrentAgents) || DEFAULT_SETTINGS.maxConcurrentAgents));
     settings.includeSearchInOrchestration = true;
     settings.autoSearchPolicy = settings.autoSearchPolicy || DEFAULT_SETTINGS.autoSearchPolicy;
+    settings.agentApi = settings.agentApi || DEFAULT_SETTINGS.agentApi;
+    settings.agentApiPresetName = settings.agentApiPresetName || DEFAULT_SETTINGS.agentApiPresetName;
     settings.settingsVersion = SETTINGS_VERSION;
     saveSettings();
 }
@@ -209,16 +335,19 @@ function updateRunPanel(title, statusText = '') {
     if (typeof toastr === 'undefined') {
         return;
     }
+    const html = renderRunPanelHtml(title);
     if (!runtime.activeRunToast) {
-        runtime.activeRunToast = toastr.info('', 'Duo', {
+        runtime.activeRunToast = toastr.info(html, '', {
             timeOut: 0,
             extendedTimeOut: 0,
             tapToDismiss: false,
             closeButton: true,
             progressBar: false,
+            escapeHtml: false,
         });
+        return;
     }
-    runtime.activeRunToast?.find?.('.toast-message')?.html(renderRunPanelHtml(title));
+    runtime.activeRunToast?.find?.('.toast-message')?.html(html);
 }
 
 function beginRunPanel(title) {
@@ -664,17 +793,25 @@ function buildAgentPrompt(agent, recentChat, latestUser, searchBrief) {
 
 async function runAgent(agentId, contextBlock, options = {}) {
     const settings = getSettings();
-    const agent = AGENTS[agentId] || AGENTS.single;
+    const agent = getAgentDefinition(agentId);
     const prompt = buildAgentPrompt(agent, contextBlock.recentChat, contextBlock.latestUser, contextBlock.searchBrief);
     const request = {
         prompt,
         systemPrompt: agent.system,
         trimNames: false,
     };
+    const api = getSelectedAgentApi(settings);
+    if (api) {
+        request.api = api;
+    }
+    const apiPresetName = getSelectedAgentApiPresetName(settings);
+    if (apiPresetName) {
+        request.apiPresetName = apiPresetName;
+    }
     if (options.responseLength) {
         request.responseLength = Math.max(128, Number(options.responseLength) || 420);
     }
-    const text = await generateRaw(request);
+    const text = await generateDuoRaw(request, settings);
     return {
         id: agentId,
         label: agent.label,
@@ -709,12 +846,21 @@ async function synthesizeCapsule(agentOutputs, contextBlock) {
         '保持短而具体。不要替主模型写完整回复。',
     ].join('\n');
 
-    return generateRaw({
+    const request = {
         prompt,
         systemPrompt: '你是剧情总编，负责把并行 agent 的意见压缩成短、清晰、可执行的 prompt 注入文本。',
         responseLength: Math.max(256, Number(settings.synthResponseLength) || 720),
         trimNames: false,
-    });
+    };
+    const api = getSelectedAgentApi(settings);
+    if (api) {
+        request.api = api;
+    }
+    const apiPresetName = getSelectedAgentApiPresetName(settings);
+    if (apiPresetName) {
+        request.apiPresetName = apiPresetName;
+    }
+    return generateDuoRaw(request, settings);
 }
 
 function injectCapsuleToPayload(payload, capsule) {
@@ -803,14 +949,15 @@ async function runMultiAgent(source = 'manual', payload = null) {
 
         const agentIds = MODE_AGENTS[settings.orchestrationMode] || MODE_AGENTS.fast;
         const concurrency = Math.max(1, Math.min(5, Number(settings.maxConcurrentAgents) || 3));
+        const agentLabels = agentIds.map(getAgentLabel).join(' / ');
         setStatus(`Running ${agentIds.length} agent(s)...`);
-        setRunStep('agents', '多智能体运行', 'running', `${agentIds.length} 个 agent，并发 ${concurrency}`);
+        setRunStep('agents', '多智能体运行', 'running', `${agentLabels}；路由：${getAgentRouteLabel(settings)}；并发 ${concurrency}`);
         const parallelAgents = agentIds.length > 1 && concurrency > 1;
         const agentResponseLength = parallelAgents ? null : settings.responseLength;
         const agentOutputs = await mapLimit(agentIds, concurrency, agentId => runAgent(agentId, contextBlock, {
             responseLength: agentResponseLength,
         }));
-        setRunStep('agents', '多智能体运行', 'done', `${agentOutputs.length} 个结果`);
+        setRunStep('agents', '多智能体运行', 'done', agentOutputs.map(output => output.label).join(' / '));
 
         let capsule = '';
         if (agentOutputs.length === 1) {
@@ -934,11 +1081,32 @@ function buildSettingsHtml() {
                         <div class="duo-extension-field">
                             <label for="duo_orchestration_mode">Agent 模式</label>
                             <select id="duo_orchestration_mode">
-                                <option value="single">Single</option>
-                                <option value="fast">Fast</option>
-                                <option value="balanced">Balanced</option>
-                                <option value="deep">Deep</option>
+                                <option value="single">Single - 单节点</option>
+                                <option value="fast">Fast - 快速三节点</option>
+                                <option value="director">Director - 导演组</option>
+                                <option value="creative">Creative - 创作组</option>
+                                <option value="research">Research - 搜索资料组</option>
+                                <option value="quality">Quality - 质量组</option>
+                                <option value="audit">Audit - 审校组</option>
+                                <option value="balanced">Balanced - 平衡组</option>
+                                <option value="deep">Deep - 全量组</option>
                             </select>
+                        </div>
+                        <div class="duo-extension-field">
+                            <label for="duo_agent_api">Agent API</label>
+                            <select id="duo_agent_api">
+                                <option value="current">当前主 API</option>
+                                <option value="openai">OpenAI / 兼容</option>
+                                <option value="textgenerationwebui">TextGen WebUI</option>
+                                <option value="kobold">Kobold</option>
+                                <option value="koboldhorde">Kobold Horde</option>
+                                <option value="novel">NovelAI</option>
+                            </select>
+                        </div>
+                        <div class="duo-extension-field">
+                            <label for="duo_agent_api_preset_name">连接配置</label>
+                            <input id="duo_agent_api_preset_name" type="text" list="duo_agent_api_preset_names" placeholder="Luker profile name，空=当前">
+                            <datalist id="duo_agent_api_preset_names">${renderConnectionProfileDatalist(getSettings().agentApiPresetName)}</datalist>
                         </div>
                         <div class="duo-extension-field">
                             <label for="duo_max_concurrent_agents">并发数</label>
@@ -1030,6 +1198,9 @@ function syncSettingsUi() {
     $('#duo_max_results').val(settings.maxResults);
     $('#duo_visit_top_results').val(settings.visitTopResults);
     $('#duo_orchestration_mode').val(settings.orchestrationMode);
+    $('#duo_agent_api').val(settings.agentApi);
+    $('#duo_agent_api_preset_name').val(settings.agentApiPresetName);
+    $('#duo_agent_api_preset_names').html(renderConnectionProfileDatalist(settings.agentApiPresetName));
     $('#duo_max_concurrent_agents').val(settings.maxConcurrentAgents);
     $('#duo_response_length').val(settings.responseLength);
     $('#duo_synth_response_length').val(settings.synthResponseLength);
@@ -1048,6 +1219,8 @@ function bindUi() {
     bindInput('duo_max_results', 'maxResults', value => Math.max(1, Math.min(20, Number(value) || 6)));
     bindInput('duo_visit_top_results', 'visitTopResults', value => Math.max(0, Math.min(3, Number(value) || 0)));
     bindInput('duo_orchestration_mode', 'orchestrationMode');
+    bindInput('duo_agent_api', 'agentApi');
+    bindInput('duo_agent_api_preset_name', 'agentApiPresetName', normalizeWhitespace);
     bindInput('duo_max_concurrent_agents', 'maxConcurrentAgents', value => Math.max(1, Math.min(5, Number(value) || 3)));
     bindInput('duo_response_length', 'responseLength', value => Math.max(128, Number(value) || 420));
     bindInput('duo_synth_response_length', 'synthResponseLength', value => Math.max(256, Number(value) || 720));
