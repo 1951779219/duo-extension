@@ -17,6 +17,7 @@ const STATUS_ID = 'duo_status';
 const OUTPUT_ID = 'duo_output';
 const RESULTS_ID = 'duo_results';
 const SETTINGS_VERSION = 2;
+const ALLOWED_GENERATION_TYPES = new Set(['normal', 'continue', 'regenerate', 'swipe', 'impersonate']);
 
 const DEFAULT_SETTINGS = Object.freeze({
     settingsVersion: SETTINGS_VERSION,
@@ -114,6 +115,9 @@ const MODE_AGENTS = Object.freeze({
 
 const runtime = {
     running: false,
+    hasPayloadHook: false,
+    activeRunToast: null,
+    runSteps: [],
     latestCapsule: '',
     latestResults: [],
     searchCache: new Map(),
@@ -185,6 +189,76 @@ function setStatus(message) {
     $(`#${STATUS_ID}`).text(message || '');
 }
 
+function renderRunPanelHtml(title) {
+    const rows = runtime.runSteps.map(step => `
+        <div class="duo-extension-run-step duo-extension-run-step-${escapeHtml(step.state || 'todo')}">
+            <b>${escapeHtml(step.label)}</b>
+            ${step.detail ? `<span>${escapeHtml(step.detail)}</span>` : ''}
+        </div>
+    `).join('');
+    return `
+        <div class="duo-extension-run-panel">
+            <div class="duo-extension-run-title">${escapeHtml(title || 'Duo 正在运行...')}</div>
+            ${rows || '<div class="duo-extension-run-step">准备中...</div>'}
+        </div>
+    `;
+}
+
+function updateRunPanel(title, statusText = '') {
+    setStatus(statusText || title || '');
+    if (typeof toastr === 'undefined') {
+        return;
+    }
+    if (!runtime.activeRunToast) {
+        runtime.activeRunToast = toastr.info('', 'Duo', {
+            timeOut: 0,
+            extendedTimeOut: 0,
+            tapToDismiss: false,
+            closeButton: true,
+            progressBar: false,
+        });
+    }
+    runtime.activeRunToast?.find?.('.toast-message')?.html(renderRunPanelHtml(title));
+}
+
+function beginRunPanel(title) {
+    runtime.runSteps = [];
+    updateRunPanel(title || 'Duo 正在运行...', title || 'Duo 正在运行...');
+}
+
+function setRunStep(id, label, state = 'running', detail = '') {
+    const existing = runtime.runSteps.find(step => step.id === id);
+    if (existing) {
+        existing.label = label;
+        existing.state = state;
+        existing.detail = detail;
+    } else {
+        runtime.runSteps.push({ id, label, state, detail });
+    }
+    updateRunPanel('Duo 正在处理本轮输入...', `${label}${detail ? `：${detail}` : ''}`);
+}
+
+function finishRunPanel(message, ok = true) {
+    updateRunPanel(ok ? 'Duo 已完成' : 'Duo 运行失败', message);
+    if (typeof toastr !== 'undefined' && runtime.activeRunToast) {
+        const toast = runtime.activeRunToast;
+        window.setTimeout(() => {
+            if (runtime.activeRunToast === toast) {
+                toastr.clear(runtime.activeRunToast);
+                runtime.activeRunToast = null;
+            }
+        }, ok ? 3500 : 7000);
+    }
+}
+
+function clearRunPanel() {
+    if (typeof toastr !== 'undefined' && runtime.activeRunToast) {
+        toastr.clear(runtime.activeRunToast);
+    }
+    runtime.activeRunToast = null;
+    runtime.runSteps = [];
+}
+
 function escapeHtml(value) {
     return String(value ?? '')
         .replaceAll('&', '&amp;')
@@ -213,28 +287,39 @@ function truncate(value, maxChars) {
     return `${text.slice(0, limit).trim()}...`;
 }
 
-function getRecentChat(limit) {
+function normalizeMessageText(message) {
+    return normalizeWhitespace(String(message?.mes || message?.content || '').replace(/<[^>]+>/g, ' '));
+}
+
+function getPayloadMessages(payload) {
+    if (Array.isArray(payload?.coreChat) && payload.coreChat.length) {
+        return payload.coreChat;
+    }
+    return null;
+}
+
+function getRecentChat(limit, payload = null) {
     const context = getContext();
-    const chat = Array.isArray(context.chat) ? context.chat : [];
+    const chat = getPayloadMessages(payload) || (Array.isArray(context.chat) ? context.chat : []);
     return chat.slice(-Math.max(1, Number(limit) || 1))
         .map((message) => {
             const name = normalizeWhitespace(message?.name || (message?.is_user ? context.name1 : context.name2) || '');
-            const text = normalizeWhitespace(String(message?.mes || '').replace(/<[^>]+>/g, ' '));
+            const text = normalizeMessageText(message);
             return `${name || 'Unknown'}: ${text}`;
         })
         .filter(line => line.trim().length > 1)
         .join('\n');
 }
 
-function getLatestUserMessage() {
+function getLatestUserMessage(payload = null) {
     const context = getContext();
-    const chat = Array.isArray(context.chat) ? context.chat : [];
+    const chat = getPayloadMessages(payload) || (Array.isArray(context.chat) ? context.chat : []);
     for (let i = chat.length - 1; i >= 0; i -= 1) {
         if (chat[i]?.is_user) {
-            return normalizeWhitespace(String(chat[i]?.mes || '').replace(/<[^>]+>/g, ' '));
+            return normalizeMessageText(chat[i]);
         }
     }
-    return '';
+    return normalizeWhitespace($('#send_textarea').val() || '');
 }
 
 function shouldAutoSearch(text) {
@@ -503,11 +588,10 @@ async function mapLimit(items, limit, worker) {
     return results;
 }
 
-function getSearchQueryForRun(source) {
+function getSearchQueryForRun(source, latestUser = '') {
     const settings = getSettings();
     const manualQuery = normalizeWhitespace($('#duo_search_query').val());
     if (manualQuery) return manualQuery;
-    const latestUser = getLatestUserMessage();
     const searchQuery = extractSearchQuery(latestUser);
     if (source === 'manual' && settings.autoSearchPolicy !== 'never') return searchQuery;
     if (settings.autoSearchPolicy === 'always') return searchQuery;
@@ -515,19 +599,31 @@ function getSearchQueryForRun(source) {
     return '';
 }
 
-async function collectSearchContext(source) {
+async function collectSearchContext(source, latestUser = '') {
     const settings = getSettings();
     if (!settings.includeSearchInOrchestration) {
+        setRunStep('search', '联网搜索', 'skipped', '已关闭');
         return { query: '', results: [], visitedPages: [], brief: '' };
     }
-    const query = getSearchQueryForRun(source);
+    const query = getSearchQueryForRun(source, latestUser);
     if (!query) {
+        setRunStep('search', '联网搜索', 'skipped', '本轮未触发搜索');
         return { query: '', results: [], visitedPages: [], brief: '' };
     }
 
     setStatus(`Searching: ${query}`);
-    const results = await searchWeb(query);
+    setRunStep('search', '联网搜索', 'running', query);
+    let results = [];
+    try {
+        results = await searchWeb(query);
+    } catch (error) {
+        console.warn('[Duo] search failed, continuing without web context:', error);
+        setRunStep('search', '联网搜索', 'failed', '搜索失败，已跳过联网上下文');
+        renderResults([]);
+        return { query, results: [], visitedPages: [], brief: '' };
+    }
     renderResults(results);
+    setRunStep('search', '联网搜索', 'done', `找到 ${results.length} 条结果`);
 
     const visitCount = Math.max(0, Math.min(3, Number(settings.visitTopResults) || 0));
     const visitedPages = visitCount
@@ -621,11 +717,43 @@ async function synthesizeCapsule(agentOutputs, contextBlock) {
     });
 }
 
-function injectCapsule(capsule) {
+function injectCapsuleToPayload(payload, capsule) {
+    if (!payload || typeof payload !== 'object') return false;
+    const settings = getSettings();
+    const text = normalizeWhitespace(capsule);
+    if (!text) return false;
+    const packet = `[Duo剧情协作]\n${text}`;
+    const depth = Math.max(0, Math.min(100, Number(settings.injectionDepth) || 0));
+    const role = Number.isFinite(Number(settings.injectionRole)) ? Number(settings.injectionRole) : extension_prompt_roles.SYSTEM;
+
+    if (!Array.isArray(payload.worldInfoDepth)) {
+        payload.worldInfoDepth = [];
+    }
+    let target = payload.worldInfoDepth.find(entry => (
+        Math.max(0, Number(entry?.depth) || 0) === depth
+        && Number(entry?.role) === role
+    ));
+    if (!target) {
+        target = { depth, role, entries: [] };
+        payload.worldInfoDepth.push(target);
+    }
+    if (!Array.isArray(target.entries)) {
+        target.entries = [];
+    }
+    if (!target.entries.includes(packet)) {
+        target.entries.push(packet);
+    }
+    return true;
+}
+
+function injectCapsule(capsule, payload = null) {
     const settings = getSettings();
     const text = normalizeWhitespace(capsule);
     if (!text) {
         setExtensionPrompt(INJECT_KEY, '', extension_prompt_types.NONE, 0);
+        return;
+    }
+    if (injectCapsuleToPayload(payload, text)) {
         return;
     }
     const role = Number(settings.injectionRole);
@@ -644,7 +772,7 @@ function clearInjection() {
     setExtensionPrompt(INJECT_KEY, '', extension_prompt_types.NONE, 0);
 }
 
-async function runMultiAgent(source = 'manual') {
+async function runMultiAgent(source = 'manual', payload = null) {
     const settings = getSettings();
     if (!settings.enabled) {
         setStatus('Disabled.');
@@ -657,9 +785,16 @@ async function runMultiAgent(source = 'manual') {
 
     runtime.running = true;
     try {
-        const latestUser = getLatestUserMessage();
-        const recentChat = getRecentChat(settings.maxRecentMessages);
-        const searchContext = await collectSearchContext(source);
+        beginRunPanel(source === 'auto' ? 'Duo 自动运行中...' : 'Duo 手动运行中...');
+        const latestUser = getLatestUserMessage(payload);
+        const recentChat = getRecentChat(settings.maxRecentMessages, payload);
+        if (!latestUser && source === 'auto') {
+            setRunStep('input', '读取当前输入', 'failed', '没有拿到本轮用户消息');
+            finishRunPanel('Duo 未拿到本轮输入，已跳过。', false);
+            return '';
+        }
+        setRunStep('input', '读取当前输入', 'done', truncate(latestUser, 80));
+        const searchContext = await collectSearchContext(source, latestUser);
         const contextBlock = {
             latestUser,
             recentChat,
@@ -669,30 +804,38 @@ async function runMultiAgent(source = 'manual') {
         const agentIds = MODE_AGENTS[settings.orchestrationMode] || MODE_AGENTS.fast;
         const concurrency = Math.max(1, Math.min(5, Number(settings.maxConcurrentAgents) || 3));
         setStatus(`Running ${agentIds.length} agent(s)...`);
+        setRunStep('agents', '多智能体运行', 'running', `${agentIds.length} 个 agent，并发 ${concurrency}`);
         const parallelAgents = agentIds.length > 1 && concurrency > 1;
         const agentResponseLength = parallelAgents ? null : settings.responseLength;
         const agentOutputs = await mapLimit(agentIds, concurrency, agentId => runAgent(agentId, contextBlock, {
             responseLength: agentResponseLength,
         }));
+        setRunStep('agents', '多智能体运行', 'done', `${agentOutputs.length} 个结果`);
 
         let capsule = '';
         if (agentOutputs.length === 1) {
             capsule = normalizeWhitespace(agentOutputs[0].text);
         } else {
             setStatus('Synthesizing capsule...');
+            setRunStep('synth', '合成剧情指导', 'running', '');
             capsule = normalizeWhitespace(await synthesizeCapsule(agentOutputs, contextBlock));
+            setRunStep('synth', '合成剧情指导', 'done', `${capsule.length} 字符`);
         }
         renderOutput(capsule);
 
         if (source === 'auto' || settings.injectAfterManualRun) {
-            injectCapsule(capsule);
+            injectCapsule(capsule, payload);
+            setRunStep('inject', '注入本轮提示词', 'done', payload ? '已写入生成 payload' : '已写入扩展注入');
         }
 
         setStatus(source === 'auto' ? 'Auto capsule injected.' : 'Capsule ready.');
+        finishRunPanel(source === 'auto' ? 'Duo 已自动注入本轮提示词。' : 'Duo 已生成并注入剧情指导。', true);
         return capsule;
     } catch (error) {
         console.error('[Duo] multi-agent run failed:', error);
         notify('error', `Duo failed: ${error.message || error}`);
+        setRunStep('error', '运行失败', 'failed', String(error?.message || error));
+        finishRunPanel(`Duo 运行失败：${error.message || error}`, false);
         setStatus('Failed.');
         return '';
     } finally {
@@ -707,13 +850,19 @@ async function onManualSearch(force = true) {
         return;
     }
     try {
+        beginRunPanel('Duo 正在搜索...');
         setStatus(`Searching: ${query}`);
+        setRunStep('search', '联网搜索', 'running', query);
         const results = await searchWeb(query, { force });
         renderResults(results);
+        setRunStep('search', '联网搜索', 'done', `找到 ${results.length} 条结果`);
         setStatus(`Found ${results.length} result(s).`);
+        finishRunPanel(`搜索完成：${results.length} 条结果。`, true);
     } catch (error) {
         console.error('[Duo] search failed:', error);
         notify('error', `Search failed: ${error.message || error}`);
+        setRunStep('search', '联网搜索', 'failed', String(error?.message || error));
+        finishRunPanel(`搜索失败：${error.message || error}`, false);
         setStatus('Search failed.');
     }
 }
@@ -920,19 +1069,46 @@ function bindUi() {
 }
 
 async function onGenerationAfterCommands(type, params, dryRun) {
+    if (runtime.hasPayloadHook) return;
     const settings = getSettings();
     if (!settings.enabled || !settings.autoBeforeGeneration) return;
     if (dryRun || type === 'quiet' || params?.quiet_prompt) return;
     await runMultiAgent('auto');
 }
 
+function shouldRunForPayload(payload) {
+    const settings = getSettings();
+    if (!settings.enabled || !settings.autoBeforeGeneration) return false;
+    if (!payload || typeof payload !== 'object' || payload.dryRun) return false;
+    const type = String(payload.type || 'normal').trim().toLowerCase();
+    if (!ALLOWED_GENERATION_TYPES.has(type)) return false;
+    if (payload.signal?.aborted) return false;
+    return Array.isArray(payload.coreChat) && payload.coreChat.length > 0;
+}
+
+async function onGenerationWorldInfoFinalized(payload) {
+    if (!shouldRunForPayload(payload)) return;
+    await runMultiAgent('auto', payload);
+}
+
 jQuery(() => {
+    const context = getContext();
     getSettings();
     if (!$(`#${UI_ID}`).length) {
         $('#extensions_settings').append(buildSettingsHtml());
         bindUi();
     }
-    eventSource.on(event_types.GENERATION_AFTER_COMMANDS, onGenerationAfterCommands);
-    eventSource.on(event_types.CHAT_CHANGED, () => setStatus(''));
+    const finalizedEvent = context?.eventTypes?.GENERATION_WORLD_INFO_FINALIZED;
+    if (finalizedEvent && context?.eventSource) {
+        runtime.hasPayloadHook = true;
+        context.eventSource.on(finalizedEvent, onGenerationWorldInfoFinalized);
+    } else {
+        eventSource.on(event_types.GENERATION_AFTER_COMMANDS, onGenerationAfterCommands);
+    }
+    eventSource.on(event_types.CHAT_CHANGED, () => {
+        clearRunPanel();
+        clearInjection();
+        setStatus('');
+    });
     console.info('[Duo] loaded.');
 });

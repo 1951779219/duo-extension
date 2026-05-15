@@ -91,3 +91,42 @@
   border-top: 1px solid var(--SmartThemeBorderColor);
   margin: 2px 0;
 }
+
+.duo-extension-run-panel {
+  min-width: 240px;
+  max-width: 420px;
+}
+
+.duo-extension-run-title {
+  font-weight: 700;
+  margin-bottom: 6px;
+}
+
+.duo-extension-run-step {
+  display: grid;
+  grid-template-columns: 110px minmax(0, 1fr);
+  gap: 8px;
+  padding: 3px 0;
+  line-height: 1.35;
+}
+
+.duo-extension-run-step span {
+  opacity: 0.86;
+  overflow-wrap: anywhere;
+}
+
+.duo-extension-run-step-running b {
+  color: var(--SmartThemeQuoteColor, #7aa2ff);
+}
+
+.duo-extension-run-step-done b {
+  color: var(--SmartThemeEmColor, #74c476);
+}
+
+.duo-extension-run-step-failed b {
+  color: var(--warning, #ff6b6b);
+}
+
+.duo-extension-run-step-skipped b {
+  opacity: 0.72;
+}
