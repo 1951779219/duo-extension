@@ -7,6 +7,7 @@
 - 可见运行状态：自动搜索、agent 运行、合成和注入都会像 Luker 一样弹出状态提示，现在弹窗正文会显示每个阶段和当前细节。
 - Agent 组合更完整：支持 Single、Fast、Director、Creative、Research、Quality、Audit、Balanced、Deep 等模式。
 - Agent API 可选：可使用当前 SillyTavern 主 API，也可以指定 OpenAI/兼容、TextGen WebUI、Kobold、Kobold Horde、NovelAI；在 Luker 环境里还可以填写 Connection Profile 名称。
+- 自动清理旧指导：删除/编辑消息、切换 swipe、删除 swipe、切换聊天或开始新一轮运行时，会清掉上一次 Duo 注入的剧情 capsule。
 - 加速思路：默认 Fast 模式只跑 3 个 agent 并行 + 1 次合成，避免多阶段工作流的长串行链路。
 
 ## 安装
@@ -30,6 +31,7 @@ NAS/Docker 部署时，请持久化扩展目录或用户 data 目录，否则容
 - Serper、Tavily、SerpAPI、Z.AI 需要你在 SillyTavern 里配置对应 secret。
 - Agent API 选择调用的是 SillyTavern `generateRaw` 支持的后端；如果选“当前主 API”，就跟随你当前聊天使用的 API。
 - “连接配置”字段对应 Luker 的 Connection Profile / `apiPresetName`。普通 SillyTavern 没有这个能力时保持为空即可；OpenAI-compatible 自定义接口可以通过 ST 的 OpenAI/兼容 API 设置使用。
+- Duo 生成的剧情 capsule 默认不是世界书条目；它写入 SillyTavern 扩展提示词通道，自动运行时优先写入本次生成 payload。面板里的“清除”会立即移除这段注入。
 
 ## 推荐设置
 

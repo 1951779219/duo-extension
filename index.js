@@ -918,6 +918,19 @@ function clearInjection() {
     setExtensionPrompt(INJECT_KEY, '', extension_prompt_types.NONE, 0);
 }
 
+function clearCapsuleState(statusText = '', options = {}) {
+    const clearOutput = options.clearOutput !== false;
+    const clearStatus = options.clearStatus !== false;
+    clearInjection();
+    runtime.latestCapsule = '';
+    if (clearOutput) {
+        $(`#${OUTPUT_ID}`).text('No capsule yet.');
+    }
+    if (clearStatus) {
+        setStatus(statusText);
+    }
+}
+
 async function runMultiAgent(source = 'manual', payload = null) {
     const settings = getSettings();
     if (!settings.enabled) {
@@ -931,6 +944,7 @@ async function runMultiAgent(source = 'manual', payload = null) {
 
     runtime.running = true;
     try {
+        clearCapsuleState('', { clearOutput: false, clearStatus: false });
         beginRunPanel(source === 'auto' ? 'Duo 自动运行中...' : 'Duo 手动运行中...');
         const latestUser = getLatestUserMessage(payload);
         const recentChat = getRecentChat(settings.maxRecentMessages, payload);
@@ -1235,8 +1249,7 @@ function bindUi() {
         setStatus(runtime.latestCapsule ? 'Capsule injected.' : 'No capsule to inject.');
     });
     $('#duo_clear_btn').on('click', () => {
-        clearInjection();
-        setStatus('Injection cleared.');
+        clearCapsuleState('Injection cleared.');
     });
     syncSettingsUi();
 }
@@ -1264,6 +1277,11 @@ async function onGenerationWorldInfoFinalized(payload) {
     await runMultiAgent('auto', payload);
 }
 
+function clearAfterChatMutation() {
+    if (runtime.running) return;
+    clearCapsuleState('', { clearStatus: false });
+}
+
 jQuery(() => {
     const context = getContext();
     getSettings();
@@ -1280,8 +1298,15 @@ jQuery(() => {
     }
     eventSource.on(event_types.CHAT_CHANGED, () => {
         clearRunPanel();
-        clearInjection();
+        clearCapsuleState('', { clearStatus: false });
         setStatus('');
     });
+    [
+        event_types.MESSAGE_DELETED,
+        event_types.MESSAGE_EDITED,
+        event_types.MESSAGE_UPDATED,
+        event_types.MESSAGE_SWIPED,
+        event_types.MESSAGE_SWIPE_DELETED,
+    ].filter(Boolean).forEach(eventName => eventSource.on(eventName, clearAfterChatMutation));
     console.info('[Duo] loaded.');
 });
