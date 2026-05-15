@@ -1,0 +1,93 @@
+.duo-extension {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+
+.duo-extension-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(180px, 1fr));
+  gap: 8px;
+}
+
+.duo-extension-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-wrap: wrap;
+}
+
+.duo-extension-row > label,
+.duo-extension-field label {
+  margin: 0;
+}
+
+.duo-extension-field {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+
+.duo-extension-field input,
+.duo-extension-field select,
+.duo-extension-field textarea {
+  width: 100%;
+}
+
+.duo-extension textarea {
+  min-height: 96px;
+  resize: vertical;
+}
+
+.duo-extension-actions {
+  display: flex;
+  gap: 8px;
+  flex-wrap: wrap;
+}
+
+.duo-extension-actions .menu_button {
+  min-height: 32px;
+}
+
+.duo-extension-status {
+  min-height: 20px;
+  opacity: 0.85;
+}
+
+.duo-extension-output,
+.duo-extension-results {
+  border: 1px solid var(--SmartThemeBorderColor);
+  border-radius: 6px;
+  padding: 8px;
+  max-height: 280px;
+  overflow: auto;
+  background: color-mix(in srgb, var(--SmartThemeBlurTintColor) 20%, transparent);
+}
+
+.duo-extension-result {
+  padding: 6px 0;
+  border-bottom: 1px solid color-mix(in srgb, var(--SmartThemeBorderColor) 55%, transparent);
+}
+
+.duo-extension-result:last-child {
+  border-bottom: 0;
+}
+
+.duo-extension-result-title {
+  font-weight: 600;
+}
+
+.duo-extension-result-url {
+  font-size: 0.9em;
+  opacity: 0.78;
+  word-break: break-all;
+}
+
+.duo-extension-muted {
+  opacity: 0.75;
+}
+
+.duo-extension-divider {
+  border-top: 1px solid var(--SmartThemeBorderColor);
+  margin: 2px 0;
+}

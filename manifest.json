@@ -1,0 +1,11 @@
+{
+  "display_name": "Duo: Search + Agents",
+  "loading_order": 111,
+  "js": "index.js",
+  "css": "style.css",
+  "author": "1951779219 / Codex",
+  "version": "0.1.0",
+  "homePage": "https://github.com/1951779219/duo-extension",
+  "auto_update": true,
+  "minimum_client_version": "1.16.0"
+}
