@@ -509,7 +509,11 @@ async function postJson(url, body) {
     });
     if (!response.ok) {
         const text = await response.text().catch(() => '');
-        throw new Error(`${url} failed: ${response.status} ${response.statusText}${text ? ` - ${text.slice(0, 160)}` : ''}`);
+        const error = new Error(`${url} failed: ${response.status} ${response.statusText}${text ? ` - ${text.slice(0, 160)}` : ''}`);
+        error.status = response.status;
+        error.url = url;
+        error.body = text;
+        throw error;
     }
     const contentType = String(response.headers.get('content-type') || '');
     return contentType.includes('application/json') ? response.json() : response.text();
@@ -594,7 +598,15 @@ function parseSearxngHtml(html, baseUrl, maxResults) {
 
 function normalizeProviderJson(provider, data, maxResults) {
     let items = [];
-    if (provider === 'serper') {
+    if (provider === 'ddg' || provider === 'duckduckgo_html' || provider === 'searxng') {
+        items = Array.isArray(data?.results)
+            ? data.results.map(x => ({
+                title: x.title,
+                url: x.url || x.link,
+                snippet: x.snippet || x.content || x.text_excerpt,
+            }))
+            : [];
+    } else if (provider === 'serper') {
         items = Array.isArray(data?.organic) ? data.organic.map(x => ({ title: x.title, url: x.link, snippet: x.snippet })) : [];
     } else if (provider === 'tavily') {
         items = Array.isArray(data?.results) ? data.results.map(x => ({ title: x.title, url: x.url, snippet: x.content })) : [];
@@ -605,6 +617,41 @@ function normalizeProviderJson(provider, data, maxResults) {
         items = Array.isArray(raw) ? raw.map(x => ({ title: x.title || x.name, url: x.url || x.link, snippet: x.snippet || x.content })) : [];
     }
     return uniqueResults(items, maxResults);
+}
+
+async function searchSearxng(baseUrl, query, maxResults) {
+    const data = await postJson('/api/search/searxng', { baseUrl, query, max_results: maxResults });
+    return typeof data === 'string'
+        ? parseSearxngHtml(data, baseUrl, maxResults)
+        : normalizeProviderJson('searxng', data, maxResults);
+}
+
+async function searchDuckDuckGo(query, maxResults, settings) {
+    try {
+        const data = await postJson('/api/search/ddg', { query, max_results: maxResults });
+        return normalizeProviderJson('ddg', data, maxResults);
+    } catch (error) {
+        console.warn('[Duo] /api/search/ddg unavailable, trying fallback search paths:', error);
+        try {
+            const url = `https://html.duckduckgo.com/html/?q=${encodeURIComponent(query)}`;
+            const html = await fetchVisitedHtml(url);
+            const results = parseDuckDuckGoHtml(html, maxResults);
+            if (results.length) {
+                return results;
+            }
+        } catch (visitError) {
+            console.warn('[Duo] DuckDuckGo HTML fallback failed:', visitError);
+        }
+        const baseUrl = String(settings.searxngBaseUrl || '').replace(/\/+$/, '');
+        if (baseUrl) {
+            try {
+                return await searchSearxng(baseUrl, query, maxResults);
+            } catch (searxngError) {
+                console.warn('[Duo] SearXNG fallback failed:', searxngError);
+            }
+        }
+        throw error;
+    }
 }
 
 async function searchWeb(query, { force = false } = {}) {
@@ -627,14 +674,11 @@ async function searchWeb(query, { force = false } = {}) {
     let results = [];
 
     if (settings.searchProvider === 'duckduckgo_html') {
-        const url = `https://html.duckduckgo.com/html/?q=${encodeURIComponent(normalizedQuery)}`;
-        const html = await fetchVisitedHtml(url);
-        results = parseDuckDuckGoHtml(html, maxResults);
+        results = await searchDuckDuckGo(normalizedQuery, maxResults, settings);
     } else if (settings.searchProvider === 'searxng') {
         const baseUrl = String(settings.searxngBaseUrl || '').replace(/\/+$/, '');
         if (!baseUrl) throw new Error('SearXNG base URL is empty.');
-        const html = await postJson('/api/search/searxng', { baseUrl, query: normalizedQuery });
-        results = parseSearxngHtml(html, baseUrl, maxResults);
+        results = await searchSearxng(baseUrl, normalizedQuery, maxResults);
     } else {
         const endpoint = `/api/search/${settings.searchProvider}`;
         const data = await postJson(endpoint, { query: normalizedQuery });
@@ -756,11 +800,24 @@ async function collectSearchContext(source, latestUser = '') {
 
     const visitCount = Math.max(0, Math.min(3, Number(settings.visitTopResults) || 0));
     const visitedPages = visitCount
-        ? await mapLimit(results.slice(0, visitCount), Math.min(visitCount, 2), async result => ({
-            url: result.url,
-            text: await visitUrl(result.url, settings.visitMaxChars),
-        }))
+        ? (await mapLimit(results.slice(0, visitCount), Math.min(visitCount, 2), async result => {
+            try {
+                return {
+                    url: result.url,
+                    text: await visitUrl(result.url, settings.visitMaxChars),
+                };
+            } catch (error) {
+                console.warn('[Duo] visit failed, skipping result:', result.url, error);
+                return {
+                    url: result.url,
+                    text: '',
+                };
+            }
+        })).filter(page => page.text)
         : [];
+    if (visitCount) {
+        setRunStep('visit', '阅读全文', 'done', `成功 ${visitedPages.length}/${Math.min(visitCount, results.length)} 篇`);
+    }
 
     return {
         query,

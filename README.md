@@ -2,6 +2,7 @@
 
 一个二合一 SillyTavern 前端扩展：
 - 联网搜索：DuckDuckGo HTML、SearXNG、Serper、Tavily、SerpAPI、Z.AI。
+- DuckDuckGo 在 Luker 环境里优先使用 `/api/search/ddg`，旧版 SillyTavern 没有该接口时会回退到 HTML 抓取或 SearXNG。
 - 剧情多智能体：多个短 agent 并行分析聊天，再由合成器生成剧情 capsule 并注入下一轮回复。
 - 开箱即用：默认启用生成前自动运行；普通聊天会自动跑剧情 agent，出现“搜索 / 联网 / 查一下 / 最新 / 今天 / 新闻”等词时会自动搜索。
 - 可见运行状态：自动搜索、agent 运行、合成和注入都会像 Luker 一样弹出状态提示，现在弹窗正文会显示每个阶段和当前细节。
